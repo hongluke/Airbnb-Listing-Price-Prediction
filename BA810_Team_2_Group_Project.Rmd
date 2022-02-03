@@ -1,0 +1,392 @@
+---
+title: 'BA810: Team 2: Group Project'
+author: "Luke Hong, Carmen Cheung, Tavishi Pandey, Zichen Wang, Jiazhi Jia, Mona Ma"
+date: "10/01/2021"
+output:
+  pdf_document: default
+  html_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+Setup and Load the Airbnb dataset and Train/Test split
+```{r}
+
+library(data.table)
+library(ggplot2)
+library(ggthemes)
+library(glmnet)
+library(caTools)
+# [, -1] means take all columns of the matrix except the first column, which is an index
+dd <- fread("ab_updated.csv")[, -1]
+# set seed for splitting training / test data
+set.seed(810)
+sample <- sample.split(dd$num, SplitRatio = .70)
+train <- subset(dd , sample == TRUE)
+test <- subset(dd, sample == FALSE)
+# the [, -1] means take all columns of the matrix except the first column, which is an intercept
+# splitting x and y train/test
+x.train <- model.matrix( ~ . - host_since - zipcode, train)[, -2][, -1]
+y.train <- train$log_price
+x.test <- model.matrix( ~ . - host_since - zipcode, test)[, -2][, -1]
+y.test <- test$log_price
+
+```
+
+Lasso Regression
+
+Predict responses / Compute MSEs for Lasso
+```{r}
+# use the cv.glmnet command to automatically select the best value for the lambda hyper-parameter.
+fit.lasso <- cv.glmnet(x.train, y.train, alpha = 1, nfolds = 10)
+
+# computing MSE on the training/test data
+yhat.train.lasso <- predict(fit.lasso, x.train) 
+yhat.test.lasso <- predict(fit.lasso, x.test)
+
+mse.train.lasso <- mean((y.train - yhat.train.lasso)^2)
+mse.test.lasso <- mean((y.test - yhat.test.lasso)^2)
+
+mse.train.lasso
+mse.test.lasso
+
+```
+Lasso Lambda and MSE Graph
+```{r}
+# manual function to reverse on x axis and scale at the same time on ggplot2
+library("scales")
+reverselog_trans <- function(base = exp(1)) {
+    trans <- function(x) -log(x, base)
+    inv <- function(x) base^(-x)
+    trans_new(paste0("reverselog-", format(base)), trans, inv, 
+              log_breaks(base = base), 
+              domain = c(1e-100, Inf))
+}
+# The broom package takes the messy output of built-in functions in R, and turns them into tidy tibbles for use of ggplot2
+library(broom)
+
+tidied_cv <- tidy(fit.lasso)
+glance_cv <- glance(fit.lasso)
+g <- ggplot(tidied_cv, aes(lambda, estimate)) +
+  geom_line() + scale_x_continuous(trans=reverselog_trans(10))
+g <- g + geom_ribbon(aes(ymin = conf.low, ymax = conf.high), alpha = .25)
+g <- g +
+  geom_vline(xintercept = glance_cv$lambda.min) + ggtitle("Lasso Regression") +
+  xlab("Lambda") + ylab("MSE")
+g
+```
+Lasso Coefficients Graph
+```{r}
+# each colored line represents the value taken by a different coefficient in your model, plot to show the complexity of the model
+op <- par(mfrow=c(1, 2))
+# L1 norm is the regularization term for Lasso
+plot(fit.lasso$glmnet.fit, "norm",   label=TRUE)
+plot(fit.lasso$glmnet.fit, "lambda", label=TRUE)
+par(op)
+```
+Lasso Coefficients
+```{r}
+# examine the coefficients associated with min lambda.min, the value of lambda that gives minimum mean cross-validated error
+# lambda.1se, the value of lambda that gives the most regularized model such that the cross-validated error is within one standard error of the minimum.
+# One line of reasoning suggests using 1se because it hedges against overfitting by selecting a larger  value than the min. 
+lasso_coef <- coef(fit.lasso, s = fit.lasso$lambda.min)
+lasso_coef_df <- data.frame(name = lasso_coef@Dimnames[[1]][lasso_coef@i + 1], coefficient = lasso_coef@x)
+lasso_coef_df <- lasso_coef_df[order(lasso_coef_df[,2]),]
+
+lasso_coef_df
+#print.data.frame(lasso_coef_df)
+#write.csv(lasso_coef_df,file="lasso_coef_df.csv")
+```
+
+Ridge Regression
+
+Predict responses / Compute MSEs for Ridge
+```{r}
+# use the cv.glmnet command to automatically select the best value for the lambda hyper-parameter.
+# cv.glmnet returns a cv.glmnet object, a list with all the ingredients of the cross-validated fit
+fit.ridge <- cv.glmnet(x.train, y.train, alpha = 0, nfolds = 10)
+
+# computing MSE on the training/test data
+yhat.train.ridge <- predict(fit.ridge, x.train) 
+yhat.test.ridge <- predict(fit.ridge, x.test)
+
+mse.train.ridge <- mean((y.train - yhat.train.ridge)^2)
+mse.test.ridge <- mean((y.test - yhat.test.ridge)^2)
+
+mse.train.ridge
+mse.test.ridge
+
+```
+Ridge: Lambda and MSE Graph
+
+```{r}
+tidied_cv <- tidy(fit.ridge)
+glance_cv <- glance(fit.ridge)
+g <- ggplot(tidied_cv, aes(lambda, estimate)) +
+  geom_line() + scale_x_continuous(trans=reverselog_trans(10))
+g <- g + geom_ribbon(aes(ymin = conf.low, ymax = conf.high), alpha = .25)
+g <- g +
+  geom_vline(xintercept = glance_cv$lambda.min) + ggtitle("Ridge Regression") +
+  xlab("Lambda") + ylab("MSE")
+g
+```
+Ridge Coefficients
+```{r}
+ridge_coef <- coef(fit.ridge, s = fit.ridge$lambda.min)
+ridge_coef_df <- data.frame(name = ridge_coef@Dimnames[[1]][ridge_coef@i + 1], coefficient = ridge_coef@x)
+ridge_coef_df <- ridge_coef_df[order(ridge_coef_df[,2]),]
+
+ridge_coef_df
+```
+
+Predict responses / Compute MSEs for Elastic Net
+```{r}
+fit.elastic <- cv.glmnet(x.train, y.train, alpha = 0.5, nfolds = 10)
+
+yhat.train.elastic <- predict(fit.elastic, x.train) 
+yhat.test.elastic <- predict(fit.elastic, x.test)
+
+mse.train.elastic <- mean((y.train - yhat.train.elastic)^2)
+mse.test.elastic <- mean((y.test - yhat.test.elastic)^2)
+
+mse.train.elastic
+mse.test.elastic
+```
+Elastic Net Coefficients
+```{r}
+elastic_coef <- coef(fit.elastic, s = fit.elastic$lambda.min)
+elastic_coef_df <- data.frame(name = elastic_coef@Dimnames[[1]][elastic_coef@i + 1], coefficient = elastic_coef@x)
+elastic_elastic_df <- elastic_coef_df[order(elastic_coef_df[,2]),]
+
+elastic_coef_df
+```
+
+```{r}
+tidied_cv <- tidy(fit.elastic)
+glance_cv <- glance(fit.elastic)
+g <- ggplot(tidied_cv, aes(lambda, estimate)) +
+  geom_line() + scale_x_continuous(trans=reverselog_trans(10))
+g <- g + geom_ribbon(aes(ymin = conf.low, ymax = conf.high), alpha = .25)
+g <- g +
+  geom_vline(xintercept = glance_cv$lambda.min) + ggtitle("Elastic Net") +
+  xlab("Lambda") + ylab("MSE")
+g
+```
+```{r}
+# explicitly control the fold that each observation is assigned to via the foldid argument
+foldid <- sample(1:10, size = length(y.train), replace = TRUE)
+cv.1  <- cv.glmnet(x.train, y.train, foldid = foldid, alpha = 1)
+cv.5 <- cv.glmnet(x.train, y.train, foldid = foldid, alpha = 0.5)
+cv.0  <- cv.glmnet(x.train, y.train, foldid = foldid, alpha = 0)
+
+par(mfrow = c(2,2))
+plot(cv.1, col = "red", xlim=rev(c(-9,1)))
+legend("topright", legend = c("Lasso/alpha=1"),
+       pch = 19, col = c("red"))
+
+plot(cv.5, col = "grey", xlim=rev(c(-9,1)))
+legend("topright", legend = c("Elastic Net/alpha=.5"),
+       pch = 19, col = c("red")); 
+
+plot(cv.0, col = "blue", xlim=rev(c(-3,7)))
+legend("topright", legend = c("Ridge/alpha=0"),
+       pch = 19, col = c("red"))
+
+plot(log(cv.1$lambda), cv.1$cvm , pch = 19, col = "red",
+     xlab = "log(Lambda)", ylab = cv.1$name, xlim=rev(c(-9,1)))
+     
+points(log(cv.5$lambda), cv.5$cvm, pch = 19, col = "grey")
+
+points(log(cv.0$lambda) , cv.0$cvm , pch = 19, col = "blue")
+legend("topright", legend = c("alpha= 1", "alpha= .5", "alpha 0"),
+       pch = 19, col = c("red","grey","blue"))
+
+# The intervals estimate variance of the loss metric (red dots). They're computed using CV.
+# The vertical dotted lines show the locations of labda min and lambda 1se.
+# The numbers across the top are the number of nonzero coefficient estimates.
+```
+
+
+Linear Regression
+
+Forward / Backward Selection
+```{r}
+library(data.table)
+library(caret)
+library(olsrr)
+dd<-fread('ab_updated.csv')
+dd<-dd[,c(2:5,7:8,10:196)]
+dd<-na.omit(dd)
+dd.sample.size <- 72955
+dd <- dd[sample(nrow(dd), dd.sample.size)]
+# 70 - 30 split
+smp_size <- floor(0.70 * nrow(dd))
+train_ind <- sample(seq_len(nrow(dd)), size = smp_size)
+train<-dd[train_ind, ]
+test<-dd[-train_ind,]
+
+trainControl<-trainControl(method='cv',number=2)
+linearmodel2<-train(log_price~.,data=train,method='leapForward',
+                    tuneGrid=data.frame(nvmax=1:170),
+                    preProcess=NULL,trControl=trainControl)
+Forward_result<-data.table(Variable=colnames(summary(linearmodel2$finalModel)[["which"]]),
+                           Order_Add=(max(colSums(summary(linearmodel2$finalModel)[["which"]]))-colSums(summary(linearmodel2$finalModel)[["which"]])))
+
+linearmodel3<-train(log_price~.,data=train,method='leapBackward',
+                    tuneGrid=data.frame(nvmax=1:170),
+                    preProcess=NULL,trControl=trainControl)
+Backward_result<-data.table(Variable=colnames(summary(linearmodel3$finalModel)[["which"]]),
+                            Order_Remove=colSums(summary(linearmodel3$finalModel)[["which"]]))
+
+Forward_result<-Forward_result[order(Forward_result[,2]),]
+Backward_result<-Backward_result[order(-Backward_result[,2]),]
+print(head(Forward_result,5))
+print(head(Backward_result,5))
+
+y_forward=predict(linearmodel2,test)
+MSEtest_forward<-colMeans((test[,1]-y_forward)^2)
+print(MSEtest_forward)
+
+y_bavkward=predict(linearmodel3,test)
+MSEtest_backward<-colMeans((test[,1]-y_bavkward)^2)
+print(MSEtest_backward)
+```
+
+Predict responses / Compute MSEs for Linear Regression
+```{r}
+y_forward=predict(linearmodel2,test)
+MSEtest_forward<-colMeans((test[,1]-y_forward)^2)
+print(MSEtest_forward)
+
+y_bavkward=predict(linearmodel3,test)
+MSEtest_backward<-colMeans((test[,1]-y_bavkward)^2)
+print(MSEtest_backward)
+
+```
+
+
+Boosting
+
+Predict responses / Compute MSEs for Boosting
+```{r cars, warning=FALSE}
+### Generalized Boosted Regression Modeling (GBM)
+# Setup
+library(caTools)
+library(data.table) 
+library(ggplot2) 
+library(ggthemes) 
+library(glmnet) 
+library(rpart)
+library(rpart.plot)
+theme_set(theme_bw())
+library(scales)
+library(gbm)
+
+# Splite Test and Train
+
+ab <- fread("ab_updated.csv", stringsAsFactors = T)
+ab <- ab[,-1] # remove the ID
+ab <- ab[,-5] # remove host_since
+
+set.seed(810)
+sample = sample.split(ab$num, SplitRatio = .70)
+ab.train = subset(ab , sample == TRUE)
+ab.test = subset(ab, sample == FALSE)
+
+ab.train.sample.size <- 5000
+ab.train.sample <- ab.train[sample(nrow(ab.train), ab.train.sample.size)]
+
+# Set sample dataset 
+f1 <- as.formula(log_price ~.)
+x1.train.sample <- model.matrix(f1, ab.train.sample)[, -1]
+y.train <- ab.train$log_price
+y.train.sample <- ab.train.sample$log_price
+
+x1.test <- model.matrix(f1, ab.test)[, -1]
+y.test <- ab.test$log_price
+
+
+# We will fit a boosted forest.
+fit.btree <- gbm(f1,
+                 data = ab.train.sample,
+                 distribution = "gaussian",
+                 n.trees = 1000,
+                 interaction.depth = 2,
+                 shrinkage = 0.01,
+                 cv.folds = 5)
+
+relative.influence(fit.btree)
+
+# Train MSE
+yhat.btree <- predict(fit.btree, ab.train.sample, n.trees = 467)
+mse.btree <- mean((yhat.btree - y.train.sample) ^ 2)
+
+print(mse.btree)
+
+# Test MSE
+yhat.test.btree <- predict(fit.btree, ab.test,n.trees = 467)
+test.mse.btree <- mean((yhat.test.btree - y.test) ^ 2)
+print(test.mse.btree)
+
+# get MSE and compute RMSE
+min_MSE <- which.min(fit.btree$cv.error)
+sqrt(fit.btree$cv.error[min_MSE])
+
+# plot loss function as a result of n trees added to the ensemble
+gbm.perf(fit.btree, method = "cv")
+```
+
+Random Forest
+
+Predict responses / Compute MSEs for Random Forest
+```{r}
+library(data.table) 
+library(ggplot2) 
+library(ggthemes) 
+library(glmnet) 
+library(caTools)
+theme_set(theme_bw())
+
+#read the file.
+dd <- fread("/Users/jiazhijia/Desktop/810/ab.csv")
+dd<-dd[,c(1:73,693:815)]#some columns are rather useless to our model and would also slow down the speed of computation.
+
+#some column names are not readable for R.
+names(dd)<-gsub(' ','_',names(dd))
+names(dd)<-gsub('/','_',names(dd))
+names(dd)<-gsub('-','_',names(dd))
+names(dd)<-gsub('&','',names(dd))
+names(dd)<-gsub('24_','',names(dd))
+names(dd)<-gsub(',','',names(dd))
+names(dd)<-gsub("'",'',names(dd))
+names(dd)<-gsub(':','',names(dd))
+
+#test and train
+set.seed(810)
+sample = sample.split(dd$num, SplitRatio = .70)
+train= subset(dd , sample == TRUE)
+test= subset(dd, sample == FALSE)
+
+#dataset too large! split into small data combine them in the end.
+sample_train = sample.split(train$num, SplitRatio = .60)
+train1= subset(train, sample_train == TRUE)
+train2= subset(train, sample_train == FALSE)
+
+#build model,setting ntrees=500,try 14 variable in each split.
+library(randomForest)
+
+rf <- randomForest(log_price~., data=train1, proximity=TRUE,ntree=500,mtry=sqrt(ncol(train1)),na.action = na.omit)
+plot(rf)
+
+#see the performence on test data.
+pred=predict(rf,test)
+y_test<-test$log_price
+mse_test=mean((y_test-pred)^ 2,na.rm=TRUE)
+print(mse_test)
+
+#using plot to see the outcome.
+plot(test$log_price,pred,main='Test_set',xlab='log_price',ylab='predict') +lines(lowess(test$log_price,pred),col='red')
+varImpPlot(rf)
+```
